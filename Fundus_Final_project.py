@@ -41,20 +41,24 @@ class FundusDataset(torch.utils.data.Dataset):
 
         if self.transform:
             image = self.transform(image)
-            mask = self.transform(mask)
+            mask = Resize((128, 128))(mask)  
+            mask = ToTensor()(mask)        
 
         return image, mask
+
 
 class UNet(nn.Module):
     def __init__(self, in_channels=3, out_channels=1):
         super(UNet, self).__init__()
         def conv_block(in_c, out_c):
             return nn.Sequential(
-                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(out_c, out_c, kernel_size=3, padding=1),
-                nn.ReLU(inplace=True)
+            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_c, out_c, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3)  # Dropout added
             )
+
         
         self.encoder1 = conv_block(in_channels, 64)
         self.encoder2 = conv_block(64, 128)
