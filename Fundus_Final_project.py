@@ -8,6 +8,7 @@ import torchvision
 import torch.nn.functional as F
 from torchvision.transforms import Compose, RandomHorizontalFlip, Grayscale, Resize, RandomCrop, ToTensor
 from torch.utils.data import RandomSampler, DataLoader
+from torchmetrics import JaccardIndex, Dice
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -95,47 +96,6 @@ class UNet(nn.Module):
 
         return torch.sigmoid(self.final_conv(d1))
     
-def train(model, train_loader, loss_function, optimizer, device):
-    model.train()
-    running_loss = 0.0
-    for images, masks in train_loader:
-        images, masks = images.to(device), masks.to(device)
-        
-        # Forward pass
-        outputs = model(images)
-        loss = loss_function(outputs, masks)
-
-        # Backward pass and optimization
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item()
-    return running_loss / len(train_loader)
-
-# Define a helper function for validation
-def validate(model, val_loader, loss_function, device):
-    model.eval()
-    val_loss = 0.0
-    with torch.no_grad():
-        for images, masks in val_loader:
-            images, masks = images.to(device), masks.to(device)
-            outputs = model(images)
-            loss = loss_function(outputs, masks)
-            val_loss += loss.item()
-    return val_loss / len(val_loader)
-
-def iou_score(preds, targets, threshold=0.5):
-    preds = (preds > threshold).float()
-    intersection = (preds * targets).sum()
-    union = preds.sum() + targets.sum() - intersection
-    return intersection / union
-
-def dice_score(preds, targets, threshold=0.5):
-    preds = (preds > threshold).float()
-    intersection = (preds * targets).sum()
-    return (2. * intersection) / (preds.sum() + targets.sum())
-
 # Define the main function
 def main(learning_rate, num_epochs, data_dir):
     # Transformations for the dataset
@@ -161,20 +121,21 @@ def main(learning_rate, num_epochs, data_dir):
 
     # Initialize model, loss function, and optimizer
     model = UNet(in_channels=3, out_channels=1).to(device)
-    loss_function = nn.BCELoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    pos_weight = torch.tensor([2.0]).to(device)  # Adjust weight for class imbalance
+    loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 
     # Training and validation
     train_losses, val_losses = [], []
     for epoch in range(num_epochs):
         train_loss = train(model, train_loader, loss_function, optimizer, device)
-        val_loss = validate(model, val_loader, loss_function, device)
+        val_loss, mean_iou, mean_dice = validate(model, val_loader, loss_function, device)
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
 
-        # Print loss after every epoch
-        print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+        # Print loss and metrics after every epoch
+        print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, IoU: {mean_iou:.4f}, Dice: {mean_dice:.4f}')
 
     # Plot training and validation loss
     plt.plot(range(1, num_epochs + 1), train_losses, label='Training Loss')
@@ -183,11 +144,21 @@ def main(learning_rate, num_epochs, data_dir):
     plt.ylabel('Loss')
     plt.legend()
     plt.show()
+    
+    # Visualize predictions
+    with torch.no_grad():
+        for images, masks in val_loader:
+            images, masks = images.to(device), masks.to(device)
+            outputs = model(images)
+            visualize_predictions(images[:3], masks[:3], torch.sigmoid(outputs)[:3])
+            break  # Visualize one batch only
 
     # Testing the model
     model.eval()
     correct = 0
     total = 0
+    iou_total = 0.0
+    dice_total = 0.0
 
     with torch.no_grad():
         for images, masks in val_loader:
@@ -197,7 +168,92 @@ def main(learning_rate, num_epochs, data_dir):
             correct += (predictions == masks).sum().item()
             total += masks.numel()
 
+            # Calculate IoU and Dice scores
+            iou_total += iou_score(predictions, masks)
+            dice_total += dice_score(predictions, masks)
+
     accuracy = 100 * correct / total
+    mean_iou = iou_total / len(val_loader)
+    mean_dice = dice_total / len(val_loader)
+
     print(f'Test Accuracy: {accuracy:.2f}%')
+    print(f'Mean IoU: {mean_iou:.4f}')
+    print(f'Mean Dice Score: {mean_dice:.4f}')
+
+# Define a helper function for training
+def train(model, train_loader, loss_function, optimizer, device):
+    model.train()
+    running_loss = 0.0
+    for images, masks in train_loader:
+        images, masks = images.to(device), masks.to(device)
+        
+        # Forward pass
+        outputs = model(images)
+        loss = loss_function(outputs, masks)
+
+        # Backward pass and optimization
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+    return running_loss / len(train_loader)
+
+def validate(model, val_loader, loss_function, device):
+    model.eval()
+    val_loss = 0.0
+    iou_total = 0.0
+    dice_total = 0.0
+
+    with torch.no_grad():
+        for images, masks in val_loader:
+            images, masks = images.to(device), masks.to(device)
+            outputs = model(images)
+            
+            # Compute loss
+            loss = loss_function(outputs, masks)
+            val_loss += loss.item()
+
+            # Apply sigmoid before calculating metrics
+            predictions = torch.sigmoid(outputs)
+            iou_total += iou_score(predictions, masks)
+            dice_total += dice_score(predictions, masks)
+
+    mean_iou = iou_total / len(val_loader)
+    mean_dice = dice_total / len(val_loader)
+
+    return val_loss / len(val_loader), mean_iou, mean_dice
+
+def visualize_predictions(images, masks, predictions):
+    plt.figure(figsize=(10, 5))
+    for i in range(min(3, len(images))):
+        plt.subplot(3, 3, i * 3 + 1)
+        plt.imshow(images[i].cpu().permute(1, 2, 0))
+        plt.title("Input Image")
+
+        plt.subplot(3, 3, i * 3 + 2)
+        plt.imshow(masks[i].cpu().squeeze(), cmap='gray')
+        plt.title("Ground Truth")
+
+        plt.subplot(3, 3, i * 3 + 3)
+        plt.imshow(predictions[i].cpu().squeeze(), cmap='gray')
+        plt.title("Prediction")
+
+    plt.tight_layout()
+    plt.show()
+
+def iou_score(preds, targets, threshold=0.5):
+    preds = torch.sigmoid(preds)
+    preds = (preds > threshold).float()
+    intersection = (preds * targets).sum()
+    union = preds.sum() + targets.sum() - intersection
+    return intersection / (union + 1e-6)
+
+def dice_score(preds, targets, threshold=0.5):
+    preds = torch.sigmoid(preds)
+    preds = (preds > threshold).float()
+    intersection = (preds * targets).sum()
+    return (2. * intersection) / (preds.sum() + targets.sum() + 1e-6)
+
     
 main(0.2,20,"eyedata/output_images")
