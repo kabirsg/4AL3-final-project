@@ -52,12 +52,14 @@ class UNet(nn.Module):
         super(UNet, self).__init__()
         def conv_block(in_c, out_c):
             return nn.Sequential(
-            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_c, out_c, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3)  # Dropout added
-            )
+                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.4)  # Increased dropout rate
+    )
 
         
         self.encoder1 = conv_block(in_channels, 64)
@@ -166,7 +168,18 @@ def main(learning_rate, num_epochs, data_dir):
     # Initialize model, loss function, and optimizer
     model = UNet(in_channels=3, out_channels=1).to(device)
     loss_function = nn.BCELoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.SGD(
+        model.parameters(), 
+        lr=learning_rate, 
+        momentum=0.9,  # Adding momentum to help stabilize the gradients
+        weight_decay=1e-1  # Adding weight decay to regularize and prevent overfitting
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+
+    # Early stopping parameters
+    patience = 5  # Number of epochs to wait for improvement
+    min_val_loss = np.Inf  # Initially set to infinity
+    patience_counter = 0
 
     # Training and validation
     train_losses, val_losses = [], []
@@ -180,9 +193,30 @@ def main(learning_rate, num_epochs, data_dir):
         # Print loss after every epoch
         print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
 
+        # Step the scheduler
+        scheduler.step(val_loss)
+
+        # Early Stopping Check
+        if val_loss < min_val_loss:
+            min_val_loss = val_loss
+            patience_counter = 0  # Reset counter if validation loss improves
+            # Save the model if the validation loss is the best we've seen so far
+            torch.save(model.state_dict(), 'best_model.pth')
+        else:
+            patience_counter += 1
+
+        # If the validation loss hasn't improved for 'patience' epochs, stop training
+        if patience_counter >= patience:
+            print(f"Early stopping triggered after {epoch+1} epochs.")
+            break
+
+    # Load the best model
+    model.load_state_dict(torch.load('best_model.pth', weights_only=True))
+
+
     # Plot training and validation loss
-    plt.plot(range(1, num_epochs + 1), train_losses, label='Training Loss')
-    plt.plot(range(1, num_epochs + 1), val_losses, label='Validation Loss')
+    plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss')
+    plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
     plt.legend()
@@ -203,5 +237,6 @@ def main(learning_rate, num_epochs, data_dir):
 
     accuracy = 100 * correct / total
     print(f'Test Accuracy: {accuracy:.2f}%')
+
+main(0.02, 20, "eyedata/output_images")
     
-main(0.2,20,"eyedata/output_images")
