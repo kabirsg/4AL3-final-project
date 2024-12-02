@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Environment
+env/
+.venv/
+venv/
+ENV/
+.ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# PyTorch checkpoints
+*.pt
+*.pth
+
+# PyCharm
+.idea/
+
+# Temporary Files
+*.tmp
+*.temp
+*.swp
+
+# Packages
+*.egg
+*.egg-info/
+.eggs/
+
+# Archives
+*.tar
+*.zip
+*.gz
+*.rar
+*.7z
+*.bz2
+
+# Virtualenv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Testing
+htmlcov/
+.tox/
+.nox/
+.coverage
+coverage.xml
+.cache
+nosetests.xml
+pytest_cache/
+.pytest_cache/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+typeshed/
+
+# Pyre
+.pyre/
+
+# Profiling
+.prof
+.profraw
