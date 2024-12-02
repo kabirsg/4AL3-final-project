@@ -267,7 +267,12 @@ def main(input_dir, output_dir, num_outputs_per_image):
             if file.lower().endswith((".png", ".jpg", ".jpeg", ".txt")):
                 os.remove(os.path.join(output_dir, file))
 
+    total_images = len(os.listdir(input_dir))
+    print(f'Total number of images in "{input_dir}": {total_images}')
+    image_num = 0
     for filename in os.listdir(input_dir):
+        image_num += 1
+        print(f"Image number: {image_num}/{total_images}")
         if filename.lower().endswith((".png", ".jpg", ".jpeg")):
             print(f"Processing image: {filename}")
             input_path = os.path.join(input_dir, filename)
@@ -284,4 +289,5 @@ def main(input_dir, output_dir, num_outputs_per_image):
 
 
 if __name__ == "__main__":
-    main("input_images", "output_images", 50)
+    # main("Dataset_train001", "Dataset_train001_output", 50)
+    main("Dataset_train001_drgrade1234", "Dataset_train001_drgrade1234_output", 50)
