@@ -13,7 +13,7 @@ import pandas as pd
 import sklearn
 import random
 import pickle
-from Fundus_Final_project_good import UNet, FundusDataset
+from Fundus_Final_project_good import UNet, FundusDataset #CHANGE THIS to point to Training.py eventually
 
 #import Fundus_Final_project_good
 
@@ -25,6 +25,8 @@ data_dir = "eyedata/test_data"
 BATCH_SIZE = 8
 PRINT_ALL = True
 PRINT_EVERY_N = 10
+RES_Y = 128 #400
+RES_X = 128 #640
 
 loaded_model = pickle.load(open('model_file', 'rb'))
 
@@ -35,9 +37,9 @@ std = torch.tensor([0.1346, 0.1063, 0.0950])
 
 # Transformations for the dataset
 transform = Compose([
-    Resize((128, 128)),
-    ToTensor(),
-    torchvision.transforms.Normalize(mean=mean.tolist(), std=std.tolist())  # Use calculated mean and std
+    Resize((RES_Y, RES_X))
+    #ToTensor()
+    #torchvision.transforms.Normalize(mean=mean.tolist(), std=std.tolist())  # Use calculated mean and std
 ])
 
 # Load the test data
@@ -63,6 +65,9 @@ with torch.no_grad():
                     continue
                 
                 fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+
+                #print(f"Original Image Range: Min={original_images[idx].min()}, Max={original_images[idx].max()}")
+                #print(f"Normalized Image Range: Min={images[idx].min()}, Max={images[idx].max()}")
                 
                 # Original Image
                 axes[0].imshow(original_images[idx].cpu().permute(1, 2, 0))
