@@ -13,6 +13,8 @@ import pandas as pd
 import sklearn
 import random
 import pickle
+from datetime import datetime
+import sys
 
 RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
@@ -20,20 +22,26 @@ np.random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
 torch.cuda.manual_seed_all(RANDOM_SEED)
 
-print(torch.cuda.get_device_name(0))  # If CUDA is available
+SAVE_PICKLE = False
 
+if torch.cuda.is_available():
+    print(torch.cuda.get_device_name(0))  # If CUDA is available
 
 # Define hyperparameters
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.004
 BATCH_SIZE = 8
-NUM_EPOCHS = 5
-DATA_DIR = "eyedata/entire_dataset"
-#DATA_DIR = "eyedata/output_images"
+NUM_EPOCHS = 25
+#DATA_DIR = "eyedata/entire_dataset"
+DATA_DIR = "eyedata/output_images"
 PRINT_ALL = True
 PRINT_EVERY_N = 10
 PRINT = False
 RES_X = 640
 RES_Y = 400
+MASK_X = 32
+MASK_Y = 20
+DO_TEST = True
+ONE_BIAS = 12
 
 class FundusDataset(torch.utils.data.Dataset):
     def __init__(self, data_dir, transform=None):
@@ -81,7 +89,7 @@ class FundusDataset(torch.utils.data.Dataset):
             normalized_image = torch.tensor(normalized_image, dtype=torch.float32).permute(2, 0, 1)  # Convert back to Tensor
 
             # Apply resizing and transforms to mask
-            mask = Resize((RES_Y, RES_X))(mask)  # Match size to image
+            mask = Resize((MASK_Y, MASK_X))(mask)  # Match size to image
             mask = ToTensor()(mask)
             mask = (mask > 0.5).float()
 
@@ -95,58 +103,220 @@ class FundusDataset(torch.utils.data.Dataset):
 
         return normalized_image, mask, original_image_t
 
-class UNet(nn.Module):
+class UNet_old(nn.Module):
     def __init__(self, in_channels=3, out_channels=1):
         super(UNet, self).__init__()
-        def conv_block(in_c, out_c):
+        def conv_block(in_c, out_c, kernel_size=3):
             return nn.Sequential(
-                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
+                nn.Conv2d(in_c, out_c, kernel_size=kernel_size, padding=kernel_size//2),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(out_c, out_c, kernel_size=3, padding=1),
+                nn.Conv2d(out_c, out_c, kernel_size=kernel_size, padding=kernel_size//2),
                 nn.ReLU(inplace=True)
             )
         
-        self.encoder1 = conv_block(in_channels, 64)
-        self.encoder2 = conv_block(64, 128)
-        self.encoder3 = conv_block(128, 256)
-        self.encoder4 = conv_block(256, 512)
+        # encoders will be used with self.pool so the resolution will be halved
+        self.pool = nn.MaxPool2d(2, 2) # Halves the resolution
+        self.pool5 = nn.MaxPool2d(5, 5) # Fifths the resolution
 
-        self.pool = nn.MaxPool2d(2, 2)
+        self.encoder1 = conv_block(in_channels, 64)  # w/ no pool Output: (64, 640, 400)
+        self.encoder2 = conv_block(64, 128)          # w/ pool    Output: (128, 320, 200)
+        self.encoder3 = conv_block(128, 256)         # w/ pool    Output: (256, 160, 100)
+        self.encoder4 = conv_block(256, 512)         # w/ no pool Output: (512, 160, 100)
+        self.encoder5 = conv_block(512, 1024)        # w/ no pool Output: (1024, 160, 100)
+        self.encoder6 = conv_block(1024, 2048, 5)    # w/ pool5   Output: (2048, 32, 20)
 
-        self.bottleneck = conv_block(512, 1024)
-
-        self.upconv4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.decoder4 = conv_block(1024, 512)
-        self.upconv3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.decoder3 = conv_block(512, 256)
-        self.upconv2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.decoder2 = conv_block(256, 128)
-        self.upconv1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.decoder1 = conv_block(128, 64)
+        # stride of 2 will double the resolution, stride 1 will keep the resolution the same
+        self.upconv5 = nn.ConvTranspose2d(2048, 1024, kernel_size=2, stride=1, padding=0, output_padding=0)
+        self.decoder5 = conv_block(1024, 1024)       # Output: (1024, 32+1, 20+1)
+        self.upconv4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=1, padding=1, output_padding=0)
+        self.decoder4 = conv_block(512, 512)        # Output: (512, 32, 20)
+        self.upconv3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=1, padding=0, output_padding=0)
+        self.decoder3 = conv_block(256, 256)         # Output: (256, 32+1, 20+1)
+        self.upconv2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=1, padding=1, output_padding=0)
+        self.decoder2 = conv_block(128, 128)         # Output: (128, 32, 20)
+        self.upconv1 = nn.ConvTranspose2d(128, 64, kernel_size=1, stride=1, padding=0, output_padding=0)
+        self.decoder1 = conv_block(64, 64)          # Output: (64, 32, 20)
 
         self.final_conv = nn.Conv2d(64, out_channels, kernel_size=1)
 
-    def forward(self, x):
-        e1 = self.encoder1(x)
-        e2 = self.encoder2(self.pool(e1))
-        e3 = self.encoder3(self.pool(e2))
-        e4 = self.encoder4(self.pool(e3))
-
-        b = self.bottleneck(self.pool(e4))
-
-        d4 = self.upconv4(b)
-        d4 = self.decoder4(torch.cat((d4, e4), dim=1))
-        d3 = self.upconv3(d4)
-        d3 = self.decoder3(torch.cat((d3, e3), dim=1))
-        d2 = self.upconv2(d3)
-        d2 = self.decoder2(torch.cat((d2, e2), dim=1))
-        d1 = self.upconv1(d2)
-        d1 = self.decoder1(torch.cat((d1, e1), dim=1))
-
-        return self.final_conv(d1)
     
+
+    def forward(self, x):
+
+        def printDimention (str, x):
+            print(str, " ", x.size())
+            pass
+
+        e1 = self.encoder1(x)
+        printDimention("e1", e1)
+        e2 = self.encoder2(self.pool(e1))
+        printDimention("e2", e2)
+        e3 = self.encoder3(self.pool(e2))
+        printDimention("e3", e3)
+        e4 = self.encoder4(e3)
+        printDimention("e4", e4)
+        e5 = self.encoder5(e4)
+        printDimention("e5", e5)
+        e6 = self.encoder6(self.pool5(e5))
+        printDimention("e6", e6)
+
+        # we are not doing skip connections as we are changing resolutions
+        # and it leads to overfitting on the pixel level (or something like that, maybe)
+        d5 = self.upconv5(e6)
+        d5 = self.decoder5(d5)
+        printDimention("d5", d5)
+        d4 = self.upconv4(d5)
+        d4 = self.decoder4(d4)
+        printDimention("d4", d4)
+        d3 = self.upconv3(d4)
+        d3 = self.decoder3(d3)
+        printDimention("d3", d3)
+        d2 = self.upconv2(d3)
+        d2 = self.decoder2(d2)
+        printDimention("d2", d2)
+        d1 = self.upconv1(d2)
+        d1 = self.decoder1(d1)
+        printDimention("d1", d1)
+
+        r = self.final_conv(d1)
+        printDimention("final", r)
+        return r
+    
+
+class SobelFilter(nn.Module):
+    def __init__(self):
+        super(SobelFilter, self).__init__()
+        # Define Sobel kernels
+        sobel_kernel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        sobel_kernel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        self.sobel_kernel_x = nn.Parameter(sobel_kernel_x, requires_grad=False)
+        self.sobel_kernel_y = nn.Parameter(sobel_kernel_y, requires_grad=False)
+
+    def forward(self, x):
+        # Apply Sobel filter in x and y directions
+        print("x ", x.size())
+        # print(x);
+        print("sobel_kernel_x ", self.sobel_kernel_x.size())
+        grad_x = F.conv2d(x, self.sobel_kernel_x, padding=1)
+        print("grad_x ", grad_x.size())
+        grad_y = F.conv2d(x, self.sobel_kernel_y, padding=1)
+        # Combine gradients
+        grad = torch.sqrt(grad_x ** 2 + grad_y ** 2)
+        # print some of the raw pixel data:
+        #print("grad ", grad)
+        sobel_output = grad * 8;
+        # change any values greater than 1 to 1
+        clamped_sobel_output = torch.clamp(sobel_output, 0, 1)
+        
+        return clamped_sobel_output
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_c, out_c, kernel_size=3, dropout_rate=0.5):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_c, out_c, kernel_size=kernel_size, padding=kernel_size//2)
+        self.bn1 = nn.BatchNorm2d(out_c)
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout1 = nn.Dropout(dropout_rate)
+        self.conv2 = nn.Conv2d(out_c, out_c, kernel_size=kernel_size, padding=kernel_size//2)
+        self.bn2 = nn.BatchNorm2d(out_c)
+        self.dropout2 = nn.Dropout(dropout_rate)
+        self.skip = nn.Conv2d(in_c, out_c, kernel_size=1) if in_c != out_c else nn.Identity()
+
+    def forward(self, x):
+        identity = self.skip(x)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = self.dropout1(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.dropout2(out)
+        out += identity
+        out = self.relu(out)
+        return out
+    
+class UNet(nn.Module):
+    def __init__(self, in_channels=3, out_channels=1):
+        super(UNet, self).__init__()
+
+        def conv_block_without_residual(in_c, out_c, kernel_size=3):
+            return nn.Sequential(
+                nn.Conv2d(in_c, out_c, kernel_size=kernel_size, padding=kernel_size//2),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.5),
+                nn.Conv2d(out_c, out_c, kernel_size=kernel_size, padding=kernel_size//2),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.5),
+            )
+        
+        def conv_block(in_c, out_c, kernel_size=3):
+            return ResidualBlock(in_c, out_c, kernel_size)
+        
+        self.sobel_filter = SobelFilter()
+        in_channels = 1  # Converted RGB to grayscale
+        
+        self.downsample1 = nn.Conv2d(64, 64, kernel_size=1, stride=1, padding=0)      # Keeps the resolution
+        self.downsample2 = nn.Conv2d(128, 128, kernel_size=2, stride=2, padding=0)    # Halves the resolution
+        self.downsample3 = nn.Conv2d(256, 256, kernel_size=2, stride=2, padding=0)    # Halves the resolution
+        self.downsample4 = nn.Conv2d(512, 512, kernel_size=1, stride=1, padding=0)    # Keeps the resolution
+        self.downsample5 = nn.Conv2d(512, 512, kernel_size=5, stride=5, padding=0)  # Fifths the resolution
+
+        self.encoder1 = conv_block(in_channels, 64)  # Output: (64, 640, 400)
+        self.encoder2 = conv_block(64, 128)          # Output: (128, 320, 200)
+        self.encoder3 = conv_block(128, 256)         # Output: (256, 160, 100)
+        self.encoder4 = conv_block(256, 512)         # Output: (512, 160, 100)
+        self.encoder5 = conv_block(512, 512, 5)      # Output: (512, 32, 20)
+
+        # stride 1 will keep the resolution the same
+        self.upconv1 = nn.ConvTranspose2d(512, 64, kernel_size=1, stride=1, padding=0, output_padding=0)
+        self.decoder1 = conv_block(64, 64)           # Output: (64, 32, 20)
+        self.final_conv = nn.Conv2d(64, out_channels, kernel_size=1)  # Output: (1, 32, 20)
+    
+    def to_grayscale(self, x):
+        # Convert RGB image to grayscale
+        return x.mean(dim=1, keepdim=True)
+
+    def forward(self, x):
+
+        def printDimention (str, x):
+            print(str, " ", x.size())
+
+        # Convert to grayscale
+        x_grey = self.to_grayscale(x)
+        printDimention("x", x_grey)
+
+        # Apply Sobel filter to enhance texture details before downsampling
+        x_filtered = self.sobel_filter(x_grey)
+        printDimention("x_filtered", x_filtered)
+
+        e1 = self.encoder1(x_filtered)
+        printDimention("e1", e1)
+        e2 = self.encoder2(self.downsample1(e1))
+        printDimention("e2", e2)
+        e3 = self.encoder3(self.downsample2(e2))
+        printDimention("e3", e3)
+        e4 = self.encoder4(self.downsample3(e3))
+        printDimention("e4", e4)
+        e5 = self.encoder5(self.downsample4(e4))
+        printDimention("e5", e5)
+        e6 = self.downsample5(e5)
+        printDimention("e6", e6)
+
+        # we are not doing skip connections as we are changing resolutions
+        # and it leads to overfitting on the pixel level (or something like that, maybe)
+        d1 = self.upconv1(e6)
+        d1 = self.decoder1(d1)
+        printDimention("d1", d1)
+
+        r = self.final_conv(d1)
+        printDimention("final", r)
+        return r
+
+
 def train(model, train_loader, loss_function, optimizer, device):
-    print("Training...")
+    log("Training...")
     count = 0
     model.train()
     running_loss = 0.0
@@ -164,13 +334,13 @@ def train(model, train_loader, loss_function, optimizer, device):
 
         running_loss += loss.item()
         count += 1
-        print(f"Batch {count}, Loss: {loss.item():.4f}")
+        log(f"Batch {count}, Loss: {loss.item():.4f}")
 
     return running_loss / len(train_loader)
 
 # Define a helper function for validation
 def validate(model, val_loader, loss_function, device):
-    print("Validating...")
+    log("Validating...")
     model.eval()
     val_loss = 0.0
     total_iou = 0.0
@@ -200,8 +370,12 @@ def dice_score(preds, targets, threshold=0.5):
 
 def pixel_accuracy(preds, targets, threshold=0.5):
     preds = (preds > threshold).float()
+    #print("preds", preds)
+    #print("targets", targets)
     correct = (preds == targets).sum()
     total = targets.numel()
+    #print("correct", correct)
+    #print("total", total)
     return correct / total
 
 # Function to calculate dataset-specific mean and std
@@ -215,19 +389,26 @@ def calculate_mean_std(data_dir):
 
     mean = torch.zeros(3)
     std = torch.zeros(3)
-    print("Calculating mean and standard deviation...")
+    log("Calculating mean and standard deviation...")
     for images, _, _ in loader:
         for i in range(3):
             mean[i] += images[:, i, :, :].mean()
             std[i] += images[:, i, :, :].std()
     mean /= len(loader)
     std /= len(loader)
-    print(f"Mean: {mean}")
-    print(f"Std: {std}")
+    log(f"Mean: {mean}")
+    log(f"Std: {std}")
     return mean, std
 
+datetimestr = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+def log(*args):
+    print(*args)
+    with open('logs/log_' + datetimestr + '.txt', 'a') as f:
+        print(*args, file=f)
+
 # Define the main function
-def main(learning_rate, num_epochs, data_dir):
+def main(learning_rate, num_epochs, data_dir, continue_from):
 
     # Calculate dataset-specific mean and std
     #mean, std = calculate_mean_std(data_dir)
@@ -236,7 +417,34 @@ def main(learning_rate, num_epochs, data_dir):
     mean = torch.tensor([0.6229, 0.4124, 0.2856])
     std = torch.tensor([0.1346, 0.1063, 0.0950])
 
-    print("Training has started...")
+    log("Current Timestamp =", datetimestr)
+
+    log("Running ", sys.argv[0])
+    log("  LEARNING_RATE", LEARNING_RATE)
+    log("  NUM_EPOCHS", NUM_EPOCHS)
+    log("  DATA_DIR", DATA_DIR)
+    log("  PRINT_ALL", PRINT_ALL)
+    log("  PRINT_EVERY_N", PRINT_EVERY_N)
+    log("  PRINT", PRINT)
+    log("  RES_X", RES_X)
+    log("  RES_Y", RES_Y)
+    log("  MASK_X", MASK_X)
+    log("  MASK_Y", MASK_Y)
+    log("  DO_TEST", DO_TEST)
+    log("  RANDOM_SEED", RANDOM_SEED)
+    log("  mean", mean)
+    log("  std", std)
+    log("  BATCH_SIZE", BATCH_SIZE)
+    log("  continue_from", continue_from)
+    log("  CUDA available", torch.cuda.is_available())
+    log("  ONE_BIAS", ONE_BIAS)
+
+    # make logs and models directories if not there
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+    if not os.path.exists('models'):
+        os.makedirs('models')
+
     # Transformations for the dataset
     transform = Compose([
         Resize((RES_Y, RES_X))
@@ -252,8 +460,8 @@ def main(learning_rate, num_epochs, data_dir):
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(RANDOM_SEED))
 
     # Print the sizes of the training and validation datasets
-    print(f"Training dataset size: {len(train_dataset)}")
-    print(f"Validation dataset size: {len(val_dataset)}")
+    log(f"Training dataset size: {len(train_dataset)}")
+    log(f"Validation dataset size: {len(val_dataset)}")
 
     """
     # Log the filenames used for training and validation
@@ -271,14 +479,34 @@ def main(learning_rate, num_epochs, data_dir):
 
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Using device: {device}')
+    log(f'Using device: {device}')
+
+    def init_weights(m):
+        if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
 
     # Initialize model, loss function, and optimizer
-    model = UNet(in_channels=4, out_channels=1).to(device)
+    base_model_name = "models/model_file"
+    if (continue_from):
+        log("Continuing training...")
+        base_model_name = "models/" + continue_from
+        # if name ends with _torch, load with torch
+        if continue_from.endswith('_torch'):
+            model = torch.load(base_model_name, map_location=torch.device(device))
+        else:
+            model = pickle.load(open(base_model_name, 'rb')).to(device)
+        log (f"Continuing training from {continue_from}")
+    else:
+        model = UNet(in_channels=4, out_channels=1).to(device)
+        model.apply(init_weights)
+        log (f"Starting new training")
+    
     #loss_function = nn.BCELoss()
     #loss_function = nn.BCEWithLogitsLoss()
 
-    pos_weight = torch.ones([1]) * 10  # Increase the weight to balance classes
+    pos_weight = torch.ones([1]) * ONE_BIAS  # Increase the weight to balance classes
     loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -295,12 +523,18 @@ def main(learning_rate, num_epochs, data_dir):
         dice_scores.append(val_dice)
         pixel_accuracies.append(val_pixel)
 
-        pickle.dump(model, open('model_file_'+ str(epoch+1), 'wb')) # Save the model 
+        if(SAVE_PICKLE):
+            pickle.dump(model, open(base_model_name + '_' + datetimestr + "_" + str(epoch+1), 'wb')) # Save the model 
+        torch.save(model, base_model_name + '_' + datetimestr + "_" + str(epoch+1) + '_torch') # Save the model
 
         # Print loss, IoU, and Dice score after every epoch
-        print(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, IoU: {val_iou:.4f}, Dice: {val_dice:.4f}, Pixel Accuracy: {val_pixel:.4f}')
+        log(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, IoU: {val_iou:.4f}, Dice: {val_dice:.4f}, Pixel Accuracy: {val_pixel:.4f}')
+        # show current time
+        log(f"Current Time = {datetime.now().strftime('%H:%M:%S')}")
 
-    pickle.dump(model, open('model_file', 'wb')) # Save the model 
+    if(SAVE_PICKLE):
+        pickle.dump(model, open(base_model_name + '_' + datetimestr + '_final', 'wb')) # Save the model 
+    torch.save(model, base_model_name + '_' + datetimestr + "_final" + '_torch') # Save the model
 
     # Plot training and validation loss
     plt.figure(figsize=(12, 4))
@@ -374,34 +608,56 @@ def main(learning_rate, num_epochs, data_dir):
                 
 
     # Testing the model
-    model.eval()
-    correct = 0
-    total = 0
-    val_loss = 0.0
-    total_iou = 0.0 
-    total_dice = 0.0
-    total_pixel_accuracy = 0.0
+    if (DOTEST):
+        model.eval()
+        correct = 0
+        total = 0
+        val_loss = 0.0
+        total_iou = 0.0 
+        total_dice = 0.0
+        total_pixel_accuracy = 0.0
 
-    with torch.no_grad():
-        for images, masks, _ in val_loader:
-            images, masks = images.to(device), masks.to(device)
-            outputs = model(images)
-            outputs = torch.sigmoid(outputs)  # Apply sigmoid to convert logits to probabilities
-            loss = loss_function(outputs, masks)
-            val_loss += loss.item()
-            total_iou += iou_score(outputs, masks).item()
-            total_dice += dice_score(outputs, masks).item()
-            total_pixel_accuracy += pixel_accuracy(outputs, masks).item()
-            predictions = (outputs > 0.5).float()
-            correct += (predictions == masks).sum().item()
-            total += masks.numel()
+        with torch.no_grad():
+            for images, masks, _ in val_loader:
+                images, masks = images.to(device), masks.to(device)
+                outputs = model(images)
+                outputs = torch.sigmoid(outputs)  # Apply sigmoid to convert logits to probabilities
+                loss = loss_function(outputs, masks)
+                val_loss += loss.item()
+                total_iou += iou_score(outputs, masks).item()
+                total_dice += dice_score(outputs, masks).item()
+                total_pixel_accuracy += pixel_accuracy(outputs, masks).item()
+                predictions = (outputs > 0.5).float()
+                correct += (predictions == masks).sum().item()
+                total += masks.numel()
 
-    val_loss /= len(val_loader)
-    total_iou /= len(val_loader)
-    total_dice /= len(val_loader)
-    total_pixel_accuracy /= len(val_loader)
+        val_loss /= len(val_loader)
+        total_iou /= len(val_loader)
+        total_dice /= len(val_loader)
+        total_pixel_accuracy /= len(val_loader)
 
-    print(f'Test Loss: {val_loss:.4f}, IoU: {total_iou:.4f}, Dice: {total_dice:.4f}, Pixel Accuracy: {total_pixel_accuracy:.4f}')
+        log(f'Test Loss: {val_loss:.4f}, IoU: {total_iou:.4f}, Dice: {total_dice:.4f}, Pixel Accuracy: {total_pixel_accuracy:.4f}')
     
 if __name__ == "__main__":
-    main(LEARNING_RATE, NUM_EPOCHS, DATA_DIR)
+    # get first command line argument
+    if len(sys.argv) < 2:
+        print("Usage: python3 ", sys.argv[0], " <continue_from> [DATA_DIR]")
+        print("continue_from: 'restart' or <model_file> (a file in models/)")
+        print("DATA_DIR: directory containing images and masks, default is " + DATA_DIR)
+        sys.exit(1)
+    continue_from = sys.argv[1]
+    if continue_from == "restart":
+        continue_from = False
+    else:   
+        # check if file exists in models/
+        # if continue_from includes 'models/' prefix, remove it
+        if continue_from.startswith("models/"):
+            continue_from = continue_from[7:]
+        if not os.path.isfile("models/" + continue_from):
+            print("Model file does not exist: ", "models/" + continue_from)
+            sys.exit(1)
+
+    if len(sys.argv) > 2:
+        DATA_DIR = sys.argv[2]
+
+    main(LEARNING_RATE, NUM_EPOCHS, DATA_DIR, continue_from)
