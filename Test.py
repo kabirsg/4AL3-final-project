@@ -25,7 +25,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f'Using device: {device}')
 
 data_dir = "eyedata/test_data"
-BATCH_SIZE = 8
+BATCH_SIZE = 4
 PRINT_ALL = True
 PRINT_EVERY_N = 10
 RES_Y = 400
@@ -68,8 +68,11 @@ loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
 with torch.no_grad():
         
         for i, (images, masks, original_images, norm_images, greyscale_images) in enumerate(test_loader):
+            print("to device")
             images, masks = images.to(device), masks.to(device)
+            print("run model")
             outputs = loaded_model(images)
+            print("sigmoid")
             outputs = torch.sigmoid(outputs)  # Apply sigmoid to convert logits to probabilities
             # outputs = (outputs > 0.5).float()
 
@@ -82,12 +85,14 @@ with torch.no_grad():
                 
                 fig, axes = plt.subplots(1, 5, figsize=(20, 5))
 
+                print("loss function")
                 loss = loss_function(outputs[idx], masks[idx])
                 val_loss = loss.item()
+                print("calc stats")
                 val_iou = iou_score(outputs[idx], masks[idx]).item()
                 val_dice = dice_score(outputs[idx], masks[idx]).item()
                 val_pixel_accuracy = pixel_accuracy(outputs[idx], masks[idx]).item()
-                val_fpr = false_positive_rate(outputs[idx], masks[idx]).item()
+                val_fpr = false_positive_rate(outputs[idx], masks[idx])
 
                 print(f'Val Loss: {val_loss:.4f}, IoU: {val_iou:.4f}, Dice: {val_dice:.4f}, Pixel Accuracy: {val_pixel_accuracy:.4f}')
         

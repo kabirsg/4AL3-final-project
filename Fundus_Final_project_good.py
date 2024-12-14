@@ -29,8 +29,8 @@ if torch.cuda.is_available():
 
 # Define hyperparameters
 LEARNING_RATE = 0.004
-BATCH_SIZE = 4
-NUM_EPOCHS = 3
+BATCH_SIZE = 32
+NUM_EPOCHS = 30
 #DATA_DIR = "eyedata/entire_dataset"
 DATA_DIR = "eyedata/output_images"
 RES_X = 640
@@ -95,13 +95,13 @@ class FundusDataset(torch.utils.data.Dataset):
             normalized_image_device = normalized_image.to(self.device)
 
             # Convert Sobel image to greyscale
-            print("before greyscale")
+            #print("before greyscale")
             greyscale_image_device = normalized_image_device.mean(dim=0, keepdim=True)
-            print("after greyscale")
+            #print("after greyscale")
 
             # Apply Sobel filter
             sobel_image_device = self.sobel_filter(greyscale_image_device.unsqueeze(0)).squeeze(0)  # Add batch dimension for Sobel filter
-            print("after sobel")
+            #print("after sobel")
 
             if self.convert_to_cpu:
                 normalized_image = normalized_image_device.cpu()
@@ -286,12 +286,20 @@ def train(model, train_loader, loss_function, optimizer, device):
         images, masks = images.to(device), masks.to(device)
         
         # Forward pass
+        starttime = datetime.now()
+        print("starting model at ", starttime.strftime("%Y%m%d-%H%M%S"))
         outputs = model(images)
+        endtime = datetime.now()
+        print("model done at ", endtime.strftime("%Y%m%d-%H%M%S") + " took ", endtime - starttime)
         loss = loss_function(outputs, masks)
 
         # Backward pass and optimization
         optimizer.zero_grad()
+        starttime = datetime.now()
+        print("starting backward at ", starttime.strftime("%Y%m%d-%H%M%S"))
         loss.backward()
+        endtime = datetime.now()
+        print("backward done at ", endtime.strftime("%Y%m%d-%H%M%S") + " took ", endtime - starttime)
         optimizer.step()
 
         running_loss += loss.item()
@@ -309,17 +317,22 @@ def validate(model, val_loader, loss_function, device):
     total_dice = 0.0
     total_pixel_accuracy = 0.0
     total_fpr = 0.0
+    count = 0
 
     with torch.no_grad():
         for images, masks, _, _, _ in val_loader:
             images, masks = images.to(device), masks.to(device)
+            print("starting model")
             outputs = model(images)
+            print("model done")
             loss = loss_function(outputs, masks)
             val_loss += loss.item()
             total_iou += iou_score(outputs, masks).item()
             total_dice += dice_score(outputs, masks).item()
             total_pixel_accuracy += pixel_accuracy(outputs, masks).item()
             total_fpr += false_positive_rate(outputs, masks)
+            count += 1
+            log(f"Batch {count}, Loss: {loss.item():.4f}")
         
     num_batches = len(val_loader)
     return (
