@@ -56,7 +56,7 @@ transform = Compose([
 ])
 
 # Load the test data
-test_dataset = FundusDataset(data_dir, device, transform=transform, convert_to_cpu = True)
+test_dataset = FundusDataset(data_dir, device, include_orig=True)
 
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
@@ -67,12 +67,9 @@ loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
 
 with torch.no_grad():
         
-        for i, (images, masks, original_images, norm_images, greyscale_images) in enumerate(test_loader):
-            print("to device")
+        for i, (images, masks, original_images) in enumerate(test_loader):
             images, masks = images.to(device), masks.to(device)
-            print("run model")
             outputs = loaded_model(images)
-            print("sigmoid")
             outputs = torch.sigmoid(outputs)  # Apply sigmoid to convert logits to probabilities
             # outputs = (outputs > 0.5).float()
 

@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 import random
 import matplotlib.pyplot as plt
+import sys
 
 # Constants for image sizes
 ARTIFACT_MIN_ALPHA = 50
@@ -13,7 +14,7 @@ OUTPUT_WIDTH = 640
 OUTPUT_HEIGHT = 400
 MASK_WIDTH = 32
 MASK_HEIGHT = 20
-ZOOM_MIN = 1.0
+ZOOM_MIN = 1.5
 ZOOM_MAX = 3.0
 ARTIFACT_MIN_DIAMETER = 128
 ARTIFACT_MAX_DIAMETER = 400
@@ -235,7 +236,7 @@ def process_image(image_path, output_image_path, output_mask_path):
     display_debug(image, mask, "After Blurring Artifacts")
 
     # Save the final image and mask
-    image.convert("RGB").save(output_image_path, format="JPEG")
+    image.convert("RGB").save(output_image_path, format="PNG")
     mask_image = Image.fromarray(mask).resize(
         (MASK_WIDTH, MASK_HEIGHT), Image.Resampling.BOX
     )
@@ -254,7 +255,7 @@ def process_image(image_path, output_image_path, output_mask_path):
     np.savetxt(mask_text_path, mask_binary, fmt="%d")
 
 
-def main(input_dir, output_dir, num_outputs_per_image):
+def main(input_dir, output_dir, num_outputs_per_image, max_images=None):
     if not os.path.exists(input_dir):
         print(f"Input directory '{input_dir}' does not exist.")
         return
@@ -269,6 +270,9 @@ def main(input_dir, output_dir, num_outputs_per_image):
 
     total_images = len(os.listdir(input_dir))
     print(f'Total number of images in "{input_dir}": {total_images}')
+    if max_images is not None:
+        print(f"Processing up to {max_images} input image")
+        total_images = min(total_images, max_images)
     image_num = 0
     for filename in os.listdir(input_dir):
         image_num += 1
@@ -279,15 +283,30 @@ def main(input_dir, output_dir, num_outputs_per_image):
             base_name = os.path.splitext(filename)[0]
             for i in range(num_outputs_per_image):
                 output_image_path = os.path.join(
-                    output_dir, f"{base_name}_output_{i + 1}.jpg"
+                    output_dir, f"{base_name}_output_{i + 1}.png"
                 )
                 output_mask_path = os.path.join(
                     output_dir, f"{base_name}_mask_{i + 1}.png"
                 )
                 process_image(input_path, output_image_path, output_mask_path)
                 print(f"   Saved output image: {output_image_path}")
+        if (image_num == max_images):
+            break
 
 
 if __name__ == "__main__":
-    # main("Dataset_train001", "Dataset_train001_output", 50)
-    main("Dataset_train001_drgrade1234", "Dataset_train001_drgrade1234_output", 50)
+    if len(sys.argv) > 1:
+        INPUT_DIR = sys.argv[1]
+    else:
+        print("Usage: python3 ", sys.argv[0], " SRC_DATA_DIR [NUM_OUTPUTS_PER_IMAGE] [MAX_IMAGES]")
+        sys.exit(1)
+    OUTPUT_DIR = INPUT_DIR + "_generated"
+    if len(sys.argv) > 2:
+        num_outputs_per_image = int(sys.argv[2])
+    else:
+        num_outputs_per_image = 50
+    if len(sys.argv) > 3:
+        max_images = int(sys.argv[3])
+    else:
+        max_images = None
+    main(INPUT_DIR, OUTPUT_DIR, num_outputs_per_image, max_images)

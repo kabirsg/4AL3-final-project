@@ -8,8 +8,7 @@ Final Project for SFWRENG 4AL3
 On web browser go to:
      cloud.lambdalabs.com
 
-Login with:
-ctaylor11235@gmail.com
+Login.
 
 Under SSH Keys, add your ssh key file (~/.ssh/id_rsa.pub) 
 
@@ -69,13 +68,16 @@ Rsync is a command that copies files from one computer to another using the ssh 
 
 This command will update the files in the your current directory (x4AL3-final-project) to the 'eye' directory on the server
    rsync -av --no-recursive * $L:/home/ubuntu/eye
+(or for the generation/preprocessing python code in eyedata)
+   rsync -av --no-recursive eyedata/* $L:/home/ubuntu/eye/eyedata
 Note: do this whenever you edit your code on your mac and want to be able to run the new code on the server.
 Note: the '--no-recursive' is important, or else rsync will update all the data files, some of which we don't need.
 
-You don't need to do this because I already did, but to get the data files onto the server
+Don't need to do this again because it's already done, but to get the data files onto the server
    rsync -av eyedata/output_images $L:/home/ubuntu/eye/eyedata/
    rsync -av eyedata/entire_dataset $L:/home/ubuntu/eye/eyedata/
-
+   rsync -av eyedata/Dataset_train001 $L:/home/ubuntu/eye/eyedata/
+   rsync -av eyedata/Dataset_train001_drgrade1234 $L:/home/ubuntu/eye/
 
 Back in the terminal window that is ssh'ed into the Server now:
 
@@ -104,6 +106,49 @@ E.g.
 
 Run 'python Test.py remote/model_file_20241214-141115_final_torch' (locally) to see the results.
 
+
+
+# Regenerating the input data (on server)
+
+copy code and source data to server:
+  rsync -av --no-recursive eyedata/* $L:/home/ubuntu/eye/eyedata
+  rsync -av eyedata/Dataset_train001 $L:/home/ubuntu/eye/eyedata/
+  rsync -av eyedata/Dataset_train001_drgrade1234 $L:/home/ubuntu/eye/eyedata
+  rsync -av eyedata/input_images $L:/home/ubuntu/eye/eyedata
+
+to regenerate entire _output data as png files
+  cd eyedata
+(needed to run in a venv and change the version of pillow)
+  python -m venv --system-site-packages venv
+  venv/binary/activate
+  pip install Pillow==10.4.0
+  python eyedata.py Dataset_train001
+  python eyedata.py Dataset_train001_drgrade1234
+to preprocess 
+  python Preprocess.py Dataset_train001_generated
+  python Preprocess.py Dataset_train001_drgrade1234_generated
+put together:
+  mkdir entire_dataset_prep
+  cp Dataset_train001_generated/* entire_dataset_prep
+  cp Dataset_train001_drgrade1234_generated/* entire_dataset_prep
+  cp Dataset_train001_generated_prep/* entire_dataset_prep
+  cp Dataset_train001_drgrade1234_generated_prep/* entire_dataset_prep
+
+to regenerate test _output data as png files
+  cd eyedata
+  python eyedata.py input_images
+to preprocess 
+  python Preprocess.py input_images_generated
+  cp input_images_generated/* input_images_generated_prep
+  
+To bring back the generated / preprocessed data:
+   rsync -av $L:/home/ubuntu/eye/eyedata/input_images_generated eyedata
+   rsync -av $L:/home/ubuntu/eye/eyedata/input_images_generated_prep eyedata
+   rsync -av $L:/home/ubuntu/eye/eyedata/Dataset_train001_generated eyedata
+   rsync -av $L:/home/ubuntu/eye/eyedata/Dataset_train001_drgrade1234_generated eyedata
+   rsync -av $L:/home/ubuntu/eye/eyedata/Dataset_train001_generated_prep eyedata
+   rsync -av $L:/home/ubuntu/eye/eyedata/Dataset_train001_drgrade1234_generated_prep eyedata
+   rsync -av $L:/home/ubuntu/eye/eyedata/entire_dataset_prep eyedata
 
 
 
