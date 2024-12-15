@@ -28,9 +28,9 @@ if torch.cuda.is_available():
     print(torch.cuda.get_device_name(0))  # If CUDA is available
 
 # Define hyperparameters
-LEARNING_RATE = 0.004
-BATCH_SIZE = 32
-NUM_EPOCHS = 30
+LEARNING_RATE = 0.001
+BATCH_SIZE = 4
+NUM_EPOCHS = 15
 #DATA_DIR = "eyedata/entire_dataset"
 DATA_DIR = "eyedata/output_images"
 RES_X = 640
@@ -38,7 +38,7 @@ RES_Y = 400
 MASK_X = 32
 MASK_Y = 20
 DO_TEST = True
-ONE_BIAS = 12
+ONE_BIAS = 1
 
 # Class that preprocesses the dataset
 # Loads images and masks, applies transformations, and returns them as tensors
@@ -202,6 +202,7 @@ class ResidualBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_c, out_c, kernel_size=kernel_size, padding=kernel_size//2)
         if do_norm:
             self.bn2 = nn.BatchNorm2d(out_c)
+        self.relu2 = nn.ReLU(inplace=True)
         self.dropout2 = nn.Dropout(dropout_rate)
         self.skip = nn.Conv2d(in_c, out_c, kernel_size=1) if in_c != out_c else nn.Identity()
 
@@ -217,7 +218,7 @@ class ResidualBlock(nn.Module):
             out = self.bn2(out)
         out = self.dropout2(out)
         out += identity
-        out = self.relu(out)
+        out = self.relu2(out)
         return out
     
 class ResNet(nn.Module):
@@ -235,7 +236,8 @@ class ResNet(nn.Module):
         self.downsample4 = nn.Conv2d(512, 512, kernel_size=1, stride=1, padding=0)    # Keeps the resolution
         self.downsample5 = nn.Conv2d(512, 512, kernel_size=5, stride=5, padding=0)  # Fifths the resolution
 
-        self.encoder1 = conv_block(in_channels, 64, do_norm = False)  # Output: (64, 640, 400)
+        #self.encoder1 = conv_block(in_channels, 64, do_norm = False)  # Output: (64, 640, 400)
+        self.encoder1 = conv_block(in_channels, 64)  # Output: (64, 640, 400)
         self.encoder2 = conv_block(64, 128)          # Output: (128, 320, 200)
         self.encoder3 = conv_block(128, 256)         # Output: (256, 160, 100)
         self.encoder4 = conv_block(256, 512)         # Output: (512, 160, 100)
@@ -343,26 +345,26 @@ def validate(model, val_loader, loss_function, device):
         total_fpr / num_batches, 
     )
 
-def iou_score(preds, targets, threshold=0.5):
-    preds = (preds > threshold).float()
+def iou_score(preds_, targets, threshold=0.5):
+    preds = (preds_ > threshold).float()
     intersection = (preds * targets).sum()
     union = preds.sum() + targets.sum() - intersection
     return intersection / union
 
-def dice_score(preds, targets, threshold=0.5):
-    preds = (preds > threshold).float()
+def dice_score(preds_, targets, threshold=0.5):
+    preds = (preds_ > threshold).float()
     intersection = (preds * targets).sum()
     return (2. * intersection) / (preds.sum() + targets.sum())
 
-def pixel_accuracy(preds, targets, threshold=0.5):
-    preds = (preds > threshold).float()
+def pixel_accuracy(preds_, targets, threshold=0.5):
+    preds = (preds_ > threshold).float()
     correct = (preds == targets).sum()
     total = targets.numel()
     return correct / total
 
-def false_positive_rate(predictions, targets):
+def false_positive_rate(predictions_, targets):
     # Binarize predictions at a threshold of 0.5
-    predictions = (predictions > 0.5).float()
+    predictions = (predictions_ > 0.5).float()
     
     # Flatten tensors for computation
     predictions = predictions.view(-1)

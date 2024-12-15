@@ -87,6 +87,7 @@ with torch.no_grad():
 
                 print("loss function")
                 loss = loss_function(outputs[idx], masks[idx])
+                print("masks[idx]", masks[idx])
                 val_loss = loss.item()
                 print("calc stats")
                 val_iou = iou_score(outputs[idx], masks[idx]).item()
@@ -122,7 +123,7 @@ with torch.no_grad():
                 axes[3].axis('off')
                 
                 # Predicted Mask
-                #print("outputs[idx].cpu().squeeze()", outputs[idx].cpu().squeeze())
+                # print("outputs[idx].cpu().squeeze()", outputs[idx].cpu().squeeze())
                 axes[4].imshow(outputs[idx].cpu().squeeze(), cmap='gray', vmin=0, vmax=1)
                 axes[4].set_title("Predicted Mask")
                 axes[4].axis('off')
