@@ -13,7 +13,7 @@ import pandas as pd
 import sklearn
 import random
 import pickle
-from Fundus_Final_project_good import ResNet, FundusDataset, ResidualBlock, SobelFilter #CHANGE THIS to point to Training.py eventually
+from Fundus_Final_project_good import ResNet, FundusDataset, ResidualBlock #CHANGE THIS to point to Training.py eventually
 from Fundus_Final_project_good import *
 import sys
 
@@ -24,7 +24,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #device = torch.device('cpu')
 print(f'Using device: {device}')
 
-data_dir = "eyedata/test_data"
+data_dir = "eyedata/input_images_generated_prep"
 BATCH_SIZE = 4
 PRINT_ALL = True
 PRINT_EVERY_N = 10
@@ -63,7 +63,7 @@ test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 loaded_model.eval()
 total_images = 0
 pos_weight = torch.ones([1]) * ONE_BIAS  # Increase the weight to balance classes
-loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
+#loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
 
 with torch.no_grad():
         
@@ -71,7 +71,7 @@ with torch.no_grad():
             images, masks = images.to(device), masks.to(device)
             outputs = loaded_model(images)
             outputs = torch.sigmoid(outputs)  # Apply sigmoid to convert logits to probabilities
-            # outputs = (outputs > 0.5).float()
+            
 
             num_images = images.size(0)
 
@@ -81,11 +81,12 @@ with torch.no_grad():
                     continue
                 
                 fig, axes = plt.subplots(1, 5, figsize=(20, 5))
-
+                
+                """
                 print("loss function")
-                loss = loss_function(outputs[idx], masks[idx])
+                #loss = loss_function(outputs[idx], masks[idx])
                 print("masks[idx]", masks[idx])
-                val_loss = loss.item()
+                #val_loss = loss.item()
                 print("calc stats")
                 val_iou = iou_score(outputs[idx], masks[idx]).item()
                 val_dice = dice_score(outputs[idx], masks[idx]).item()
@@ -93,6 +94,7 @@ with torch.no_grad():
                 val_fpr = false_positive_rate(outputs[idx], masks[idx])
 
                 print(f'Val Loss: {val_loss:.4f}, IoU: {val_iou:.4f}, Dice: {val_dice:.4f}, Pixel Accuracy: {val_pixel_accuracy:.4f}')
+                """
         
                 # Original Image
                 axes[0].imshow(original_images[idx].cpu().permute(1, 2, 0))
@@ -104,24 +106,24 @@ with torch.no_grad():
                 #axes[1].set_title("Normalized Image")
                 #axes[1].axis('off')
 
-                # show greyscale image
-                axes[1].imshow(greyscale_images[idx].squeeze().cpu(), cmap='gray')
-                axes[1].set_title("Greyscale Normalized Image")
-                axes[1].axis('off')
-
                 # Sobel Filter Output
-                axes[2].imshow(images[idx].squeeze().cpu(), cmap='gray')
-                axes[2].set_title("Sobel Filter Output")
-                axes[2].axis('off')
+                axes[1].imshow(images[idx].squeeze().cpu(), cmap='gray')
+                axes[1].set_title("Sobel Filter Output")
+                axes[1].axis('off')
                 
                 # Ground Truth Mask
-                axes[3].imshow(masks[idx].cpu().squeeze(), cmap='gray')
-                axes[3].set_title("Ground Truth Mask")
-                axes[3].axis('off')
+                axes[2].imshow(masks[idx].cpu().squeeze(), cmap='gray')
+                axes[2].set_title("Ground Truth Mask")
+                axes[2].axis('off')
                 
                 # Predicted Mask
                 # print("outputs[idx].cpu().squeeze()", outputs[idx].cpu().squeeze())
-                axes[4].imshow(outputs[idx].cpu().squeeze(), cmap='gray', vmin=0, vmax=1)
+                axes[3].imshow(outputs[idx].cpu().squeeze(), cmap='gray', vmin=0, vmax=1)
+                axes[3].set_title("Predicted Mask")
+                axes[3].axis('off')
+
+                outputs_b = (outputs > 0.5).float()
+                axes[4].imshow(outputs_b[idx].cpu().squeeze(), cmap='gray', vmin=0, vmax=1)
                 axes[4].set_title("Predicted Mask")
                 axes[4].axis('off')
                 

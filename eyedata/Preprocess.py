@@ -1,5 +1,6 @@
 import os
 import sys
+print(sys.executable)
 from PIL import Image
 from torchvision.transforms import Compose, ToTensor, Resize
 import torch
@@ -11,6 +12,7 @@ RES_X = 640
 RES_Y = 400
 MASK_X = 32
 MASK_Y = 20
+
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f'Using device: {device}')
@@ -112,6 +114,9 @@ class FundusDataset(torch.utils.data.Dataset):
         mask = Resize((MASK_Y, MASK_X))(mask) 
         mask = ToTensor()(mask)
         mask = (mask > 0.5).float()
+
+        # dimension of sobel image
+        print("sobel_image ", sobel_image.size())
 
         return sobel_image, mask, self.common_keys[idx]
     

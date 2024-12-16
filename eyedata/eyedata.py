@@ -1,9 +1,11 @@
 import os
 import numpy as np
+print(np.__version__)
 from PIL import Image, ImageDraw, ImageFilter
 import random
 import matplotlib.pyplot as plt
 import sys
+import PIL
 
 # Constants for image sizes
 ARTIFACT_MIN_ALPHA = 50
@@ -20,6 +22,9 @@ ARTIFACT_MIN_DIAMETER = 128
 ARTIFACT_MAX_DIAMETER = 400
 
 DEBUG = False
+print(PIL.__version__)
+print(sys.executable)
+
 
 
 def display_debug(image, mask, stage):

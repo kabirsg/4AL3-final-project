@@ -4,6 +4,7 @@ from torchvision.transforms import Compose, ToTensor, Resize
 import torch
 import torch.nn as nn
 import torchvision
+from torch.optim import lr_scheduler
 import torch.nn.functional as F
 from torchvision.transforms import Compose, RandomHorizontalFlip, Grayscale, Resize, RandomCrop, ToTensor
 from torch.utils.data import RandomSampler, DataLoader
@@ -28,17 +29,17 @@ if torch.cuda.is_available():
     print(torch.cuda.get_device_name(0))  # If CUDA is available
 
 # Define hyperparameters
-LEARNING_RATE = 0.001
-BATCH_SIZE = 32
+LEARNING_RATE = 0.00001
+BATCH_SIZE = 42
 NUM_EPOCHS = 15
-#DATA_DIR = "eyedata/entire_dataset"
-DATA_DIR = "eyedata/output_images"
+DATA_DIR = "eyedata/entire_dataset_prep"
+#DATA_DIR = "eyedata/output_images"
 RES_X = 640
 RES_Y = 400
 MASK_X = 32
 MASK_Y = 20
 DO_TEST = True
-ONE_BIAS = 1
+ONE_BIAS = 12
 
 # Class that preprocesses the dataset
 # Loads images and masks, applies transformations, and returns them as tensors
@@ -52,6 +53,11 @@ class FundusDataset(torch.utils.data.Dataset):
         self.image_files = {
             f: f for f in os.listdir(data_dir) if '_output_' in f and 'sobel_' in f and f.endswith('.png')
         }
+        
+        # only use part of the data
+        self.image_files = dict(list(self.image_files.items())[0:1000])
+        print("Using ", len(self.image_files), " images")
+
         self.mask_files = {
             f: f for f in os.listdir(data_dir) if '_mask_' in f and f.endswith('.png')
         }
@@ -79,6 +85,21 @@ class FundusDataset(torch.utils.data.Dataset):
                 else:
                     self.common_keys.append((img_name, mask_name))
 
+        self.one_proportions = []
+        for keys in self.common_keys:
+            if self.include_orig:
+                _, mask_name, _ = keys
+            else:
+                _, mask_name = keys
+            mask_path = os.path.join(self.data_dir, mask_name)
+            mask = Image.open(mask_path).convert('L')
+            mask = Resize((RES_Y, RES_X))(mask)
+            mask = ToTensor()(mask)
+            proportion = (mask > 0.5).float().mean().item()
+            self.one_proportions.append(proportion)
+
+        self.one_proportions = torch.tensor(self.one_proportions)
+
     def __len__(self):
         return len(self.common_keys)
 
@@ -95,14 +116,21 @@ class FundusDataset(torch.utils.data.Dataset):
         print("opening image file ", img_path)
         image = Image.open(img_path).convert('L')
         np_image = np.array(image)
-        image_t = torch.tensor(np_image, dtype=torch.uint8).float() / 256.0
+        image_t = (torch.tensor(np_image, dtype=torch.uint8).float() / 255.0).unsqueeze(0)
         # show shape of image_t
-        print("image_t ", image_t)
+        #print("image_t ", image_t)
+        #print("image_t shape ", image_t.shape)
+        #print("image_t dimensions: ", image_t.ndim)
 
         print("opening mask file ", mask_path)
         mask = Image.open(mask_path).convert('L')
+        mask = Resize((RES_Y, RES_X))(mask)
         mask = ToTensor()(mask)
         mask = (mask > 0.5).float()
+
+        # Debugging: print shapes
+        #print(f"Image tensor shape: {image_t.shape}")  # Should be [1, H, W]
+        #print(f"Mask tensor shape: {mask.shape}")      # Should be [1, MASK_Y, MASK_X]
 
         if (self.include_orig):
             orig_image = Image.open(orig_path).convert('RGBA')
@@ -114,7 +142,7 @@ class FundusDataset(torch.utils.data.Dataset):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_c, out_c, kernel_size=3, dropout_rate=0.5, do_norm=True):
+    def __init__(self, in_c, out_c, kernel_size=3, dropout_rate=0.1, do_norm=True):
         super(ResidualBlock, self).__init__()
         self.conv1 = nn.Conv2d(in_c, out_c, kernel_size=kernel_size, padding=kernel_size//2)
         self.do_norm = do_norm
@@ -202,6 +230,70 @@ class ResNet(nn.Module):
         return r
 
 
+
+class UNet(nn.Module):
+    def __init__(self, in_channels=1, out_channels=1, features=[64, 128, 256, 512]):
+        super(UNet, self).__init__()
+
+        # Encoder (Downsampling)
+        self.encoders = nn.ModuleList()
+        for feature in features:
+            self.encoders.append(self.double_conv(in_channels, feature))
+            in_channels = feature
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Bottleneck
+        self.bottleneck = self.double_conv(features[-1], features[-1] * 2)
+
+        # Decoder (Upsampling + Skip connections)
+        self.upconvs = nn.ModuleList()
+        self.decoders = nn.ModuleList()
+        for feature in reversed(features):
+            self.upconvs.append(nn.ConvTranspose2d(feature * 2, feature, kernel_size=2, stride=2))
+            self.decoders.append(self.double_conv(feature * 2, feature))
+
+        # Final convolution (output to match mask dimensions)
+        self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
+
+    def forward(self, x):
+        skip_connections = []
+
+        # Encoder path
+        for encoder in self.encoders:
+            x = encoder(x)
+            skip_connections.append(x)
+            x = self.pool(x)
+
+        # Bottleneck
+        x = self.bottleneck(x)
+        skip_connections = skip_connections[::-1]  # Reverse skip connections
+
+        # Decoder path
+        for i in range(len(self.upconvs)):
+            x = self.upconvs[i](x)
+            skip_connection = skip_connections[i]
+            if x.shape != skip_connection.shape:  # Handle mismatched shapes due to padding
+                x = F.interpolate(x, size=skip_connection.shape[2:], mode="bilinear", align_corners=False)
+            x = torch.cat((skip_connection, x), dim=1)
+            x = self.decoders[i](x)
+
+        # Final output
+        x = self.final_conv(x)
+        x = F.interpolate(x, size=(20, 32), mode="bilinear", align_corners=False)
+        return x
+
+    @staticmethod
+    def double_conv(in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+
 def train(model, train_loader, loss_function, optimizer, device):
     log("Training...")
     count = 0
@@ -214,15 +306,25 @@ def train(model, train_loader, loss_function, optimizer, device):
         starttime = datetime.now()
         print("starting model at ", starttime.strftime("%Y%m%d-%H%M%S"))
         outputs = model(images)
-        endtime = datetime.now()
+        outputs = torch.clamp(outputs, min=-10, max=10)  # Prevent extreme logits
+
+        endtime = datetime.now() 
         print("model done at ", endtime.strftime("%Y%m%d-%H%M%S") + " took ", endtime - starttime)
-        loss = loss_function(outputs, masks)
+        masks_resized = F.interpolate(masks, size=(20, 32), mode="bilinear", align_corners=False)
+
+        loss = loss_function(outputs, masks_resized)
+        
 
         # Backward pass and optimization
         optimizer.zero_grad()
         starttime = datetime.now()
         print("starting backward at ", starttime.strftime("%Y%m%d-%H%M%S"))
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                print(f"Gradient norm for {name}: {param.grad.norm().item()}")
+
         endtime = datetime.now()
         print("backward done at ", endtime.strftime("%Y%m%d-%H%M%S") + " took ", endtime - starttime)
         optimizer.step()
@@ -249,8 +351,13 @@ def validate(model, val_loader, loss_function, device):
             images, masks = images.to(device), masks.to(device)
             print("starting model")
             outputs = model(images)
+            outputs = torch.clamp(outputs, min=-10, max=10)  # Prevent extreme logits
+            masks = F.interpolate(masks, size=(20, 32), mode="bilinear", align_corners=False)
+
+
             print("model done")
             loss = loss_function(outputs, masks)
+
             val_loss += loss.item()
             total_iou += iou_score(outputs, masks).item()
             total_dice += dice_score(outputs, masks).item()
@@ -258,6 +365,17 @@ def validate(model, val_loader, loss_function, device):
             total_fpr += false_positive_rate(outputs, masks)
             count += 1
             log(f"Batch {count}, Loss: {loss.item():.4f}")
+
+            # Apply sigmoid to convert logits to probabilities
+            outputs = torch.sigmoid(outputs)
+            print("Model outputs (raw tensor):")
+            print(outputs)
+            print("Model outputs min/max:", outputs.min().item(), outputs.max().item())
+            outputs = model(images)
+            sigmoid_outputs = torch.sigmoid(outputs)
+            print(f"Raw Outputs Min/Max: {outputs.min().item()}, {outputs.max().item()}")
+            print(f"Sigmoid Outputs Min/Max: {sigmoid_outputs.min().item()}, {sigmoid_outputs.max().item()}")
+
         
     num_batches = len(val_loader)
     return (
@@ -306,6 +424,45 @@ def false_positive_rate(predictions_, targets):
 
 datetimestr = datetime.now().strftime("%Y%m%d-%H%M%S")
 
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-BCE_loss)  # Probabilities
+        F_loss = self.alpha * (1-pt)**self.gamma * BCE_loss
+        return F_loss.mean()
+
+class FocalDiceLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2):
+        super(FocalDiceLoss, self).__init__()
+        self.focal = FocalLoss(alpha, gamma)
+        self.dice = DiceLoss()
+
+    def forward(self, inputs, targets):
+        return 0.5 * self.focal(inputs, targets) + 0.5 * self.dice(inputs, targets)
+
+class DiceLoss(nn.Module):
+    def forward(self, inputs, targets, smooth=1):
+        inputs = torch.sigmoid(inputs)  # Convert logits to probabilities
+        intersection = (inputs * targets).sum()
+        dice = (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
+        return 1 - dice
+
+class CombinedLoss(nn.Module):
+    def __init__(self):
+        super(CombinedLoss, self).__init__()
+        self.bce = nn.BCEWithLogitsLoss()
+        self.dice = DiceLoss()
+
+    def forward(self, inputs, targets):
+        return 0.5 * self.bce(inputs, targets) + 0.5 * self.dice(inputs, targets)
+
+
 def log(*args):
     print(*args)
     with open('logs/log_' + datetimestr + '.txt', 'a') as f:
@@ -353,12 +510,16 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
     log(f"Validation dataset size: {len(val_dataset)}")
 
     # Data loaders
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    #train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    train_weights = dataset.one_proportions[train_dataset.indices]
+    sampler = torch.utils.data.WeightedRandomSampler(train_weights, len(train_weights))
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     def init_weights(m):
         if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            nn.init.xavier_uniform_(m.weight)
+            #nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
@@ -374,20 +535,41 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
             model = pickle.load(open(base_model_name, 'rb')).to(device)
         log (f"Continuing training from {continue_from}")
     else:
-        model = ResNet(in_channels=4, out_channels=1).to(device)
+        #model = ResNet(in_channels=4, out_channels=1).to(device)
+        model = UNet(in_channels=1, out_channels=1).to(device)
         model.apply(init_weights)
         log (f"Starting new training")
 
-    pos_weight = torch.ones([1]) * ONE_BIAS  # Increase the weight to balance classes
-    loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
+    #pos_weight = torch.ones([1]) * ONE_BIAS  # Increase the weight to balance classes
+
+    # Use this weight in the loss function
+
+    #loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
+
+    #pos_weight = torch.tensor([len(dataset) / (dataset[0][1].sum() + 1e-6)]).to(device)  # Balance based on mask foreground
+    #loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+  
+
+    #loss_function = CombinedLoss()
+
+    loss_function = FocalDiceLoss()
+
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    #loss_function = FocalLoss()
+
+
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
 
     # Training and validation
-    train_losses, val_losses, iou_scores, dice_scores, pixel_accuracies, fprs = [], [], [], [], [], []
+    train_losses, val_losses, iou_scores, dice_scores, pixel_accuracies, fprs = [], [], [], [], [], [] 
+
     for epoch in range(num_epochs):
         train_loss = train(model, train_loader, loss_function, optimizer, device)
         val_loss, val_iou, val_dice, val_pixel, fpr = validate(model, val_loader, loss_function, device)
+        scheduler.step(train_loss)
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -446,18 +628,21 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
         val_loss = 0.0
         total_iou = 0.0 
         total_dice = 0.0
+        total_fpr = 0.0
         total_pixel_accuracy = 0.0
 
         with torch.no_grad():
-            for images, masks, _, _, _ in val_loader:
+            for images, masks in val_loader:
                 images, masks = images.to(device), masks.to(device)
                 outputs = model(images)
+                masks = F.interpolate(masks, size=(20, 32), mode="bilinear", align_corners=False)
                 outputs = torch.sigmoid(outputs)  # Apply sigmoid to convert logits to probabilities
                 loss = loss_function(outputs, masks)
                 val_loss += loss.item()
                 total_iou += iou_score(outputs, masks).item()
                 total_dice += dice_score(outputs, masks).item()
                 total_pixel_accuracy += pixel_accuracy(outputs, masks).item()
+                total_fpr += false_positive_rate(outputs, masks)
                 predictions = (outputs > 0.5).float()
                 correct += (predictions == masks).sum().item()
                 total += masks.numel()
@@ -466,8 +651,9 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
         total_iou /= len(val_loader)
         total_dice /= len(val_loader)
         total_pixel_accuracy /= len(val_loader)
+        total_fpr /= len(val_loader)
 
-        log(f'Test Loss: {val_loss:.4f}, IoU: {total_iou:.4f}, Dice: {total_dice:.4f}, Pixel Accuracy: {total_pixel_accuracy:.4f}')
+        log(f'Test Loss: {val_loss:.4f}, IoU: {total_iou:.4f}, Dice: {total_dice:.4f}, Pixel Accuracy: {total_pixel_accuracy:.4f}, FPR: {total_fpr:.4f}')
     
 if __name__ == "__main__":
     # get first command line argument
