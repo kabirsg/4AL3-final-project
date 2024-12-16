@@ -13,10 +13,10 @@ RES_Y = 400
 MASK_X = 32
 MASK_Y = 20
 
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f'Using device: {device}')
 
+# Class that applies the Sobel filter to an image
 class SobelFilter(nn.Module):
     def __init__(self):
         super(SobelFilter, self).__init__()
@@ -161,14 +161,14 @@ def main(in_data_dir, out_data_dir):
 
 
 if __name__ == "__main__":
-    # get first command line argument
+    # Get first command line argument
     if len(sys.argv) < 2:
         print("Usage: python3 ", sys.argv[0], " [SRC_DATA_DIR]")
         print("DATA_DIR: directory containing images and masks, default is " + DATA_DIR)
         sys.exit(1)
     DATA_DIR = sys.argv[1]
     output_dir = DATA_DIR + "_prep"
-    # if dir doesn't exist, create it
+    # If dir doesn't exist, create it
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 

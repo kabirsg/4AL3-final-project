@@ -23,8 +23,6 @@ np.random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
 torch.cuda.manual_seed_all(RANDOM_SEED)
 
-SAVE_PICKLE = False
-
 if torch.cuda.is_available():
     print(torch.cuda.get_device_name(0))  # If CUDA is available
 
@@ -39,7 +37,8 @@ RES_Y = 400
 MASK_X = 32
 MASK_Y = 20
 DO_TEST = True
-ONE_BIAS = 12
+TIMING = False
+SAVE_PICKLE = False
 
 # Class that preprocesses the dataset
 # Loads images and masks, applies transformations, and returns them as tensors
@@ -54,8 +53,9 @@ class FundusDataset(torch.utils.data.Dataset):
             f: f for f in os.listdir(data_dir) if '_output_' in f and 'sobel_' in f and f.endswith('.png')
         }
         
-        # only use part of the data
-        self.image_files = dict(list(self.image_files.items())[0:1000])
+        # Only use part of the data
+        self.image_files = dict(list(self.image_files.items())[0:300])
+
         print("Using ", len(self.image_files), " images")
 
         self.mask_files = {
@@ -85,6 +85,8 @@ class FundusDataset(torch.utils.data.Dataset):
                 else:
                     self.common_keys.append((img_name, mask_name))
 
+        # Calculate the proportion of ones in each mask
+        # Used for balancing the dataset during training
         self.one_proportions = []
         for keys in self.common_keys:
             if self.include_orig:
@@ -104,6 +106,8 @@ class FundusDataset(torch.utils.data.Dataset):
         return len(self.common_keys)
 
     def __getitem__(self, idx):
+
+        # Load the image and mask
         if (self.include_orig):
             img_name, mask_name, orig_name = self.common_keys[idx]
             orig_path = os.path.join(self.data_dir, orig_name)
@@ -113,122 +117,31 @@ class FundusDataset(torch.utils.data.Dataset):
         img_path = os.path.join(self.data_dir, img_name)
         mask_path = os.path.join(self.data_dir, mask_name)
 
-        print("opening image file ", img_path)
+        #print("opening image file ", img_path)
+
+        # Convert the image to grayscale
         image = Image.open(img_path).convert('L')
         np_image = np.array(image)
-        image_t = (torch.tensor(np_image, dtype=torch.uint8).float() / 255.0).unsqueeze(0)
-        # show shape of image_t
-        #print("image_t ", image_t)
-        #print("image_t shape ", image_t.shape)
-        #print("image_t dimensions: ", image_t.ndim)
+        image_t = (torch.tensor(np_image, dtype=torch.uint8).float() / 255.0).unsqueeze(0) # Scale pixel values to [0, 1]
 
-        print("opening mask file ", mask_path)
-        mask = Image.open(mask_path).convert('L')
-        mask = Resize((RES_Y, RES_X))(mask)
+        #print("opening mask file ", mask_path)
+
+        # Resize and binarize the mask
+        mask = Image.open(mask_path).convert('L') # Convert to grayscale
+        mask = Resize((RES_Y, RES_X))(mask) # Resize the mask to match the image
         mask = ToTensor()(mask)
-        mask = (mask > 0.5).float()
-
-        # Debugging: print shapes
-        #print(f"Image tensor shape: {image_t.shape}")  # Should be [1, H, W]
-        #print(f"Mask tensor shape: {mask.shape}")      # Should be [1, MASK_Y, MASK_X]
+        mask = (mask > 0.5).float() # Binarize the mask
 
         if (self.include_orig):
+            # Save and return the original image for visualization
+            # Used in Test.py
             orig_image = Image.open(orig_path).convert('RGBA')
             np_orig_image = np.array(orig_image)
             orig_image_t = torch.tensor(np_orig_image, dtype=torch.uint8).permute(2, 0, 1)
             return image_t, mask, orig_image_t
 
+        # Return the image and mask tensors
         return image_t, mask
-
-
-class ResidualBlock(nn.Module):
-    def __init__(self, in_c, out_c, kernel_size=3, dropout_rate=0.1, do_norm=True):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_c, out_c, kernel_size=kernel_size, padding=kernel_size//2)
-        self.do_norm = do_norm
-        if do_norm:
-            self.bn1 = nn.BatchNorm2d(out_c)
-        self.relu = nn.ReLU(inplace=True)
-        self.dropout1 = nn.Dropout(dropout_rate)
-        self.conv2 = nn.Conv2d(out_c, out_c, kernel_size=kernel_size, padding=kernel_size//2)
-        if do_norm:
-            self.bn2 = nn.BatchNorm2d(out_c)
-        self.relu2 = nn.ReLU(inplace=True)
-        self.dropout2 = nn.Dropout(dropout_rate)
-        self.skip = nn.Conv2d(in_c, out_c, kernel_size=1) if in_c != out_c else nn.Identity()
-
-    def forward(self, x): # resnet approach
-        identity = self.skip(x)
-        out = self.conv1(x)
-        if self.do_norm:
-            out = self.bn1(out)
-        out = self.relu(out)
-        out = self.dropout1(out)
-        out = self.conv2(out)
-        if self.do_norm:
-            out = self.bn2(out)
-        out = self.dropout2(out)
-        out += identity
-        out = self.relu2(out)
-        return out
-    
-class ResNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1):
-        super(ResNet, self).__init__()
-        
-        def conv_block(in_c, out_c, kernel_size=3, do_norm=True):
-            return ResidualBlock(in_c, out_c, kernel_size, do_norm)
-        
-        in_channels = 1  # Converted RGB to grayscale
-        
-        self.downsample1 = nn.Conv2d(64, 64, kernel_size=1, stride=1, padding=0)      # Keeps the resolution
-        self.downsample2 = nn.Conv2d(128, 128, kernel_size=2, stride=2, padding=0)    # Halves the resolution
-        self.downsample3 = nn.Conv2d(256, 256, kernel_size=2, stride=2, padding=0)    # Halves the resolution
-        self.downsample4 = nn.Conv2d(512, 512, kernel_size=1, stride=1, padding=0)    # Keeps the resolution
-        self.downsample5 = nn.Conv2d(512, 512, kernel_size=5, stride=5, padding=0)  # Fifths the resolution
-
-        #self.encoder1 = conv_block(in_channels, 64, do_norm = False)  # Output: (64, 640, 400)
-        self.encoder1 = conv_block(in_channels, 64)  # Output: (64, 640, 400)
-        self.encoder2 = conv_block(64, 128)          # Output: (128, 320, 200)
-        self.encoder3 = conv_block(128, 256)         # Output: (256, 160, 100)
-        self.encoder4 = conv_block(256, 512)         # Output: (512, 160, 100)
-        self.encoder5 = conv_block(512, 512, 5)      # Output: (512, 32, 20)
-
-        # stride 1 will keep the resolution the same
-        self.upconv1 = nn.ConvTranspose2d(512, 64, kernel_size=1, stride=1, padding=0, output_padding=0)
-        self.decoder1 = conv_block(64, 64)           # Output: (64, 32, 20)
-        self.final_conv = nn.Conv2d(64, out_channels, kernel_size=1)  # Output: (1, 32, 20)
-    
-
-    def forward(self, x):
-
-        def printDimension (str, x):
-            #print(str, " ", x.size())
-            pass
-
-        e1 = self.encoder1(x)
-        printDimension("e1", e1)
-        e2 = self.encoder2(self.downsample1(e1))
-        printDimension("e2", e2)
-        e3 = self.encoder3(self.downsample2(e2))
-        printDimension("e3", e3)
-        e4 = self.encoder4(self.downsample3(e3))
-        printDimension("e4", e4)
-        e5 = self.encoder5(self.downsample4(e4))
-        printDimension("e5", e5)
-        e6 = self.downsample5(e5)
-        printDimension("e6", e6)
-
-        # we are not doing skip connections as we are changing resolutions
-        # and it leads to overfitting on the pixel level (or something like that, maybe)
-        d1 = self.upconv1(e6)
-        d1 = self.decoder1(d1)
-        printDimension("d1", d1)
-
-        r = self.final_conv(d1)
-        printDimension("final", r)
-        return r
-
 
 
 class UNet(nn.Module):
@@ -279,7 +192,7 @@ class UNet(nn.Module):
 
         # Final output
         x = self.final_conv(x)
-        x = F.interpolate(x, size=(20, 32), mode="bilinear", align_corners=False)
+        x = F.interpolate(x, size=(MASK_Y, MASK_X), mode="bilinear", align_corners=False) # Resize to match the original mask dimensions
         return x
 
     @staticmethod
@@ -293,7 +206,6 @@ class UNet(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-
 def train(model, train_loader, loss_function, optimizer, device):
     log("Training...")
     count = 0
@@ -303,30 +215,33 @@ def train(model, train_loader, loss_function, optimizer, device):
         images, masks = images.to(device), masks.to(device)
         
         # Forward pass
-        starttime = datetime.now()
-        print("starting model at ", starttime.strftime("%Y%m%d-%H%M%S"))
+        if (TIMING):
+            starttime = datetime.now()
+            print("starting model at ", starttime.strftime("%Y%m%d-%H%M%S"))
+
         outputs = model(images)
         outputs = torch.clamp(outputs, min=-10, max=10)  # Prevent extreme logits
 
-        endtime = datetime.now() 
-        print("model done at ", endtime.strftime("%Y%m%d-%H%M%S") + " took ", endtime - starttime)
-        masks_resized = F.interpolate(masks, size=(20, 32), mode="bilinear", align_corners=False)
-
+        if (TIMING):
+            endtime = datetime.now() 
+            print("model done at ", endtime.strftime("%Y%m%d-%H%M%S") + " took ", endtime - starttime)
+        
+        masks_resized = F.interpolate(masks, size=(MASK_Y, MASK_X), mode="bilinear", align_corners=False)
         loss = loss_function(outputs, masks_resized)
         
-
         # Backward pass and optimization
         optimizer.zero_grad()
-        starttime = datetime.now()
-        print("starting backward at ", starttime.strftime("%Y%m%d-%H%M%S"))
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                print(f"Gradient norm for {name}: {param.grad.norm().item()}")
 
-        endtime = datetime.now()
-        print("backward done at ", endtime.strftime("%Y%m%d-%H%M%S") + " took ", endtime - starttime)
+        if (TIMING):
+            starttime = datetime.now()
+            print("starting backward at ", starttime.strftime("%Y%m%d-%H%M%S"))
+
+        loss.backward()
+
+        if (TIMING):
+            endtime = datetime.now()
+            print("backward done at ", endtime.strftime("%Y%m%d-%H%M%S") + " took ", endtime - starttime)
+        
         optimizer.step()
 
         running_loss += loss.item()
@@ -349,36 +264,25 @@ def validate(model, val_loader, loss_function, device):
     with torch.no_grad():
         for images, masks in val_loader:
             images, masks = images.to(device), masks.to(device)
-            print("starting model")
             outputs = model(images)
             outputs = torch.clamp(outputs, min=-10, max=10)  # Prevent extreme logits
-            masks = F.interpolate(masks, size=(20, 32), mode="bilinear", align_corners=False)
+            masks = F.interpolate(masks, size=(MASK_Y, MASK_X), mode="bilinear", align_corners=False)
 
-
-            print("model done")
             loss = loss_function(outputs, masks)
 
+            # Calculate metrics
             val_loss += loss.item()
             total_iou += iou_score(outputs, masks).item()
             total_dice += dice_score(outputs, masks).item()
             total_pixel_accuracy += pixel_accuracy(outputs, masks).item()
             total_fpr += false_positive_rate(outputs, masks)
+           
             count += 1
             log(f"Batch {count}, Loss: {loss.item():.4f}")
-
-            # Apply sigmoid to convert logits to probabilities
-            outputs = torch.sigmoid(outputs)
-            print("Model outputs (raw tensor):")
-            print(outputs)
-            print("Model outputs min/max:", outputs.min().item(), outputs.max().item())
-            outputs = model(images)
-            sigmoid_outputs = torch.sigmoid(outputs)
-            print(f"Raw Outputs Min/Max: {outputs.min().item()}, {outputs.max().item()}")
-            print(f"Sigmoid Outputs Min/Max: {sigmoid_outputs.min().item()}, {sigmoid_outputs.max().item()}")
-
         
     num_batches = len(val_loader)
     return (
+        # Average metrics
         val_loss / num_batches,
         total_iou / num_batches,
         total_dice / num_batches,
@@ -386,23 +290,27 @@ def validate(model, val_loader, loss_function, device):
         total_fpr / num_batches, 
     )
 
+# IOU calculates the intersection over union of the predicted mask and the target mask
 def iou_score(preds_, targets, threshold=0.5):
     preds = (preds_ > threshold).float()
     intersection = (preds * targets).sum()
     union = preds.sum() + targets.sum() - intersection
     return intersection / union
 
+# DSC score calculated as twice the intersection divided by the area of the predicted and target masks
 def dice_score(preds_, targets, threshold=0.5):
     preds = (preds_ > threshold).float()
     intersection = (preds * targets).sum()
     return (2. * intersection) / (preds.sum() + targets.sum())
 
+# Pixel accuracy calculates the proportion of correctly predicted pixels
 def pixel_accuracy(preds_, targets, threshold=0.5):
     preds = (preds_ > threshold).float()
     correct = (preds == targets).sum()
     total = targets.numel()
     return correct / total
 
+# False positive rate calculates the proportion of pixels incorrectly predicted as foreground
 def false_positive_rate(predictions_, targets):
     # Binarize predictions at a threshold of 0.5
     predictions = (predictions_ > 0.5).float()
@@ -424,7 +332,8 @@ def false_positive_rate(predictions_, targets):
 
 datetimestr = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-
+# Focal Loss: https://arxiv.org/pdf/1708.02002.pdf
+# Mitigates the problem of class imbalance
 class FocalLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2):
         super(FocalLoss, self).__init__()
@@ -437,6 +346,17 @@ class FocalLoss(nn.Module):
         F_loss = self.alpha * (1-pt)**self.gamma * BCE_loss
         return F_loss.mean()
 
+# Dice Loss: https://arxiv.org/pdf/1708.02002.pdf
+# Measures the overlap between the predicted and target masks
+class DiceLoss(nn.Module):
+    def forward(self, inputs, targets, smooth=1):
+        inputs = torch.sigmoid(inputs)  # Convert logits to probabilities
+        intersection = (inputs * targets).sum()
+        dice = (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
+        return 1 - dice
+
+# Focal Dice Loss: Combination of Focal Loss and Dice Loss
+# Used to mitigate class imbalance and measure overlap between masks
 class FocalDiceLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2):
         super(FocalDiceLoss, self).__init__()
@@ -446,34 +366,18 @@ class FocalDiceLoss(nn.Module):
     def forward(self, inputs, targets):
         return 0.5 * self.focal(inputs, targets) + 0.5 * self.dice(inputs, targets)
 
-class DiceLoss(nn.Module):
-    def forward(self, inputs, targets, smooth=1):
-        inputs = torch.sigmoid(inputs)  # Convert logits to probabilities
-        intersection = (inputs * targets).sum()
-        dice = (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
-        return 1 - dice
-
-class CombinedLoss(nn.Module):
-    def __init__(self):
-        super(CombinedLoss, self).__init__()
-        self.bce = nn.BCEWithLogitsLoss()
-        self.dice = DiceLoss()
-
-    def forward(self, inputs, targets):
-        return 0.5 * self.bce(inputs, targets) + 0.5 * self.dice(inputs, targets)
-
-
+# Function to log messages to the console and a file
 def log(*args):
     print(*args)
     with open('logs/log_' + datetimestr + '.txt', 'a') as f:
         print(*args, file=f)
 
-# Define the main function
+# Main function
 def main(learning_rate, num_epochs, data_dir, continue_from):
 
     log("Current Timestamp =", datetimestr)
-
     log("Running ", sys.argv[0])
+
     log("  LEARNING_RATE", LEARNING_RATE)
     log("  NUM_EPOCHS", NUM_EPOCHS)
     log("  DATA_DIR", DATA_DIR)
@@ -486,9 +390,8 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
     log("  BATCH_SIZE", BATCH_SIZE)
     log("  continue_from", continue_from)
     log("  CUDA available", torch.cuda.is_available())
-    log("  ONE_BIAS", ONE_BIAS)
 
-    # make logs and models directories if not there
+    # Make logs and models directories if they don't exist
     if not os.path.exists('logs'):
         os.makedirs('logs')
     if not os.path.exists('models'):
@@ -510,16 +413,15 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
     log(f"Validation dataset size: {len(val_dataset)}")
 
     # Data loaders
-    #train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    train_weights = dataset.one_proportions[train_dataset.indices]
+    train_weights = dataset.one_proportions[train_dataset.indices] # Using the one_proportions tensor to balance the dataset
     sampler = torch.utils.data.WeightedRandomSampler(train_weights, len(train_weights))
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     def init_weights(m):
         if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-            nn.init.xavier_uniform_(m.weight)
-            #nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            #nn.init.xavier_uniform_(m.weight)
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
@@ -535,33 +437,15 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
             model = pickle.load(open(base_model_name, 'rb')).to(device)
         log (f"Continuing training from {continue_from}")
     else:
-        #model = ResNet(in_channels=4, out_channels=1).to(device)
         model = UNet(in_channels=1, out_channels=1).to(device)
         model.apply(init_weights)
         log (f"Starting new training")
 
-    #pos_weight = torch.ones([1]) * ONE_BIAS  # Increase the weight to balance classes
 
-    # Use this weight in the loss function
-
-    #loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
-
-    #pos_weight = torch.tensor([len(dataset) / (dataset[0][1].sum() + 1e-6)]).to(device)  # Balance based on mask foreground
-    #loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-  
-
-    #loss_function = CombinedLoss()
-
-    loss_function = FocalDiceLoss()
-
+    loss_function = FocalDiceLoss() # Using Focal Dice Loss
     
-    #loss_function = FocalLoss()
-
-
-    
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5) # Using Adam optimizer
+    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2) # Reduce learning rate on plateau
 
     # Training and validation
     train_losses, val_losses, iou_scores, dice_scores, pixel_accuracies, fprs = [], [], [], [], [], [] 
@@ -571,6 +455,7 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
         val_loss, val_iou, val_dice, val_pixel, fpr = validate(model, val_loader, loss_function, device)
         scheduler.step(train_loss)
 
+        # Save metrics
         train_losses.append(train_loss)
         val_losses.append(val_loss)
         iou_scores.append(val_iou)
@@ -582,9 +467,10 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
             pickle.dump(model, open(base_model_name + '_' + datetimestr + "_" + str(epoch+1), 'wb')) # Save the model 
         torch.save(model, base_model_name + '_' + datetimestr + "_" + str(epoch+1) + '_torch') # Save the model
 
-        # Print loss, IoU, and Dice score after every epoch
+        # Print loss, IoU, Dice, Pixel Accuracy, and FPR score after every epoch
         log(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, IoU: {val_iou:.4f}, Dice: {val_dice:.4f}, Pixel Accuracy: {val_pixel:.4f}, FPR: {fpr:.4f}')
-        # show current time
+        
+        # Show current time
         log(f"Current Time = {datetime.now().strftime('%H:%M:%S')}")
 
     if(SAVE_PICKLE):
@@ -617,7 +503,15 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
     plt.title('Pixel Accuracy')
     
     plt.tight_layout()
-    plt.show()
+
+    os.makedirs('graphs', exist_ok=True)
+
+    # Save the figure to a file
+    basename = 'graphs/training_validation_metrics'
+    plt_filename = f'{basename}_{datetimestr}.png'
+    plt.savefig(plt_filename)
+    print(f"Plot saved as {plt_filename}")
+    #plt.show()
 
 
     # Testing the model
@@ -635,9 +529,12 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
             for images, masks in val_loader:
                 images, masks = images.to(device), masks.to(device)
                 outputs = model(images)
-                masks = F.interpolate(masks, size=(20, 32), mode="bilinear", align_corners=False)
+                masks = F.interpolate(masks, size=(MASK_Y, MASK_X), mode="bilinear", align_corners=False) # Resize masks to match the output
+                
                 outputs = torch.sigmoid(outputs)  # Apply sigmoid to convert logits to probabilities
                 loss = loss_function(outputs, masks)
+
+                # Compute metrics
                 val_loss += loss.item()
                 total_iou += iou_score(outputs, masks).item()
                 total_dice += dice_score(outputs, masks).item()
@@ -647,6 +544,7 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
                 correct += (predictions == masks).sum().item()
                 total += masks.numel()
 
+        # Calculate average loss, IoU, Dice, Pixel Accuracy, and FPR
         val_loss /= len(val_loader)
         total_iou /= len(val_loader)
         total_dice /= len(val_loader)
@@ -656,7 +554,7 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
         log(f'Test Loss: {val_loss:.4f}, IoU: {total_iou:.4f}, Dice: {total_dice:.4f}, Pixel Accuracy: {total_pixel_accuracy:.4f}, FPR: {total_fpr:.4f}')
     
 if __name__ == "__main__":
-    # get first command line argument
+    # Get first command line argument
     if len(sys.argv) < 2:
         print("Usage: python3 ", sys.argv[0], " <continue_from> [DATA_DIR]")
         print("continue_from: 'restart' or <model_file> (a file in models/)")
@@ -666,8 +564,8 @@ if __name__ == "__main__":
     if continue_from == "restart":
         continue_from = False
     else:   
-        # check if file exists in models/
-        # if continue_from includes 'models/' prefix, remove it
+        # Check if file exists in models/
+        # If continue_from includes 'models/' prefix, remove it
         if continue_from.startswith("models/"):
             continue_from = continue_from[7:]
         if not os.path.isfile("models/" + continue_from):
@@ -677,7 +575,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 2:
         DATA_DIR = sys.argv[2]
 
-    # create models and logs directories if they don't already exist
+    # Create models and logs directories if they don't already exist
     if not os.path.exists('models'):
         os.makedirs('models')
     if not os.path.exists('logs'):
