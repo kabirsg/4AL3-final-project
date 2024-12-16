@@ -13,35 +13,34 @@ import pandas as pd
 import sklearn
 import random
 import pickle
-from Fundus_Final_project_good import ResNet, FundusDataset, ResidualBlock #CHANGE THIS to point to Training.py eventually
+from Fundus_Final_project_good import FundusDataset #CHANGE THIS to point to Training.py eventually
 from Fundus_Final_project_good import *
 import sys
 
-#import Fundus_Final_project_good
 
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-#device = torch.device('cpu')
 print(f'Using device: {device}')
 
 data_dir = "eyedata/input_images_generated_prep"
-BATCH_SIZE = 4
+BATCH_SIZE = 4 #should this be the same?
 PRINT_ALL = True
 PRINT_EVERY_N = 10
 RES_Y = 400
 RES_X = 640
 
-# if model specified on commandline, use it
-# otherwise, use the default model
-#model_file = 'model_file'
+# If model specified on commandline, use it
+# Otherwise, use the default model
+
 model_file = 'models\model_file_20241213-233150_final_torch'
 if len(sys.argv) > 1:
     model_file = sys.argv[1]
-# if doesn't include models/ prefix and file doesn't exist without it, add it
+
+# If file path doesn't include models/ prefix and file doesn't exist without it, add it
 if not os.path.exists(model_file) and os.path.exists('models/' + model_file):
     model_file = 'models/' + model_file
 
-# name ends with _torch, use torch model
+# If model name ends with _torch, use torch model
 if model_file.endswith('_torch'):
     loaded_model = torch.load(model_file, map_location=torch.device(device))
 else:
@@ -50,29 +49,20 @@ else:
 if len(sys.argv) > 2:
     data_dir = sys.argv[2]  
 
-# Transformations for the dataset
-transform = Compose([
-    Resize((RES_Y, RES_X))
-])
 
 # Load the test data
 test_dataset = FundusDataset(data_dir, device, include_orig=True)
-
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 loaded_model.eval()
 total_images = 0
-pos_weight = torch.ones([1]) * ONE_BIAS  # Increase the weight to balance classes
-#loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
-
 with torch.no_grad():
-        
+        # Graph the results
         for i, (images, masks, original_images) in enumerate(test_loader):
             images, masks = images.to(device), masks.to(device)
             outputs = loaded_model(images)
             outputs = torch.sigmoid(outputs)  # Apply sigmoid to convert logits to probabilities
-            
-
+        
             num_images = images.size(0)
 
             for idx in range(num_images):
@@ -116,15 +106,15 @@ with torch.no_grad():
                 axes[2].set_title("Ground Truth Mask")
                 axes[2].axis('off')
                 
-                # Predicted Mask
-                # print("outputs[idx].cpu().squeeze()", outputs[idx].cpu().squeeze())
+                # Predicted Mask in Greyscale
                 axes[3].imshow(outputs[idx].cpu().squeeze(), cmap='gray', vmin=0, vmax=1)
-                axes[3].set_title("Predicted Mask")
+                axes[3].set_title("Predicted Mask (Greyscale)")
                 axes[3].axis('off')
 
+                # Predicted Mask in Binary
                 outputs_b = (outputs > 0.5).float()
                 axes[4].imshow(outputs_b[idx].cpu().squeeze(), cmap='gray', vmin=0, vmax=1)
-                axes[4].set_title("Predicted Mask")
+                axes[4].set_title("Predicted Mask (Binary)")
                 axes[4].axis('off')
                 
                 plt.tight_layout()
