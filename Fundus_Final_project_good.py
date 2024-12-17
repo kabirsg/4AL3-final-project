@@ -29,7 +29,7 @@ if torch.cuda.is_available():
 # Define hyperparameters
 LEARNING_RATE = 0.00001
 BATCH_SIZE = 42
-NUM_EPOCHS = 15
+NUM_EPOCHS = 30
 DATA_DIR = "eyedata/entire_dataset_prep"
 #DATA_DIR = "eyedata/output_images"
 RES_X = 640
@@ -54,7 +54,7 @@ class FundusDataset(torch.utils.data.Dataset):
         }
         
         # Only use part of the data
-        self.image_files = dict(list(self.image_files.items())[0:300])
+        #self.image_files = dict(list(self.image_files.items())[0:300])
 
         print("Using ", len(self.image_files), " images")
 
@@ -117,14 +117,10 @@ class FundusDataset(torch.utils.data.Dataset):
         img_path = os.path.join(self.data_dir, img_name)
         mask_path = os.path.join(self.data_dir, mask_name)
 
-        #print("opening image file ", img_path)
-
         # Convert the image to grayscale
         image = Image.open(img_path).convert('L')
         np_image = np.array(image)
         image_t = (torch.tensor(np_image, dtype=torch.uint8).float() / 255.0).unsqueeze(0) # Scale pixel values to [0, 1]
-
-        #print("opening mask file ", mask_path)
 
         # Resize and binarize the mask
         mask = Image.open(mask_path).convert('L') # Convert to grayscale
@@ -478,8 +474,8 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
     torch.save(model, base_model_name + '_' + datetimestr + "_final" + '_torch') # Save the model
 
     # Plot training and validation loss
-    plt.figure(figsize=(12, 4))
-    plt.subplot(1, 3, 1)
+    plt.figure(figsize=(16, 4))
+    plt.subplot(1, 4, 1)
     plt.plot(range(1, num_epochs + 1), train_losses, label='Training Loss')
     plt.plot(range(1, num_epochs + 1), val_losses, label='Validation Loss')
     plt.xlabel('Epochs')
@@ -487,7 +483,7 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
     plt.legend()
     plt.title('Training and Validation Loss')
     
-    plt.subplot(1, 3, 2)
+    plt.subplot(1, 4, 2)
     plt.plot(range(1, num_epochs + 1), iou_scores, label='IoU Score')
     plt.plot(range(1, num_epochs + 1), dice_scores, label='Dice Score')
     plt.xlabel('Epochs')
@@ -495,12 +491,19 @@ def main(learning_rate, num_epochs, data_dir, continue_from):
     plt.legend()
     plt.title('IoU and Dice Scores')
 
-    plt.subplot(1, 3, 3)
+    plt.subplot(1, 4, 3)
     plt.plot(range(1, num_epochs + 1), pixel_accuracies, label='Pixel Accuracy')
     plt.xlabel('Epochs')
     plt.ylabel('Accuracy')
     plt.legend()
     plt.title('Pixel Accuracy')
+
+    plt.subplot(1, 4, 4)
+    plt.plot(range(1, num_epochs + 1), fprs, label='FPR Score')
+    plt.xlabel('Epochs')
+    plt.ylabel('Score')
+    plt.legend()
+    plt.title('FPR Score')
     
     plt.tight_layout()
 
